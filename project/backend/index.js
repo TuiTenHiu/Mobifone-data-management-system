@@ -1,13 +1,19 @@
 const express = require('express');
 const cors = require('cors');
-const db = require('./db');
+const db = require('./db'); // file db.js phải có connection pool dùng mysql2/promise
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 console.log('Đã khởi động file index.js');
-// Lấy danh sách thuê bao
+
+// ✅ Route test
+app.get('/', (req, res) => {
+  res.send('Backend API is running on Render!');
+});
+
+// ✅ Lấy danh sách thuê bao
 app.get('/api/subscribers', async (req, res) => {
   try {
     const [rows] = await db.query(`
@@ -33,84 +39,95 @@ app.get('/api/subscribers', async (req, res) => {
     `);
     res.json(rows);
   } catch (err) {
+    console.error('Error in /api/subscribers:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Lấy danh sách tỉnh/thành
+// ✅ Lấy danh sách tỉnh/thành
 app.get('/api/provinces', async (req, res) => {
   try {
     const [rows] = await db.query('SELECT DISTINCT province FROM district');
     res.json(rows);
   } catch (err) {
+    console.error('Error in /api/provinces:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Lấy danh sách quận/huyện theo tỉnh
+// ✅ Lấy danh sách quận/huyện theo tỉnh
 app.get('/api/districts', async (req, res) => {
   const { province } = req.query;
   try {
-    const [rows] = await db.query('SELECT district, full_name FROM district WHERE province = ?', [province]);
+    const [rows] = await db.query(
+      'SELECT district, full_name FROM district WHERE province = ?',
+      [province]
+    );
     res.json(rows);
   } catch (err) {
+    console.error('Error in /api/districts:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// API lấy KPI thực tế
+// ✅ API KPI
 app.get('/api/kpi', async (req, res) => {
   try {
     // Tổng số thuê bao
-    const [totalResult] = await db.query('SELECT COUNT(*) as total FROM subscribers');
+    const [totalResult] = await db.query(
+      'SELECT COUNT(*) as total FROM subscribers'
+    );
     const totalSubscribers = totalResult[0].total;
 
-    // Số thuê bao hoạt động (giả sử có trạng thái ACTIVE hoặc tương tự)
+    // Thuê bao đang hoạt động
     const [activeResult] = await db.query(`
       SELECT COUNT(*) as active 
       FROM subscribers s
       LEFT JOIN sta_type st ON s.sta_type = st.sta_type 
-      WHERE st.name LIKE '%hoạt động%' OR st.name LIKE '%active%' OR s.sta_type IN ('ACTIVE', '4UFF', 'CFKK')
+      WHERE st.name LIKE '%hoạt động%' 
+         OR st.name LIKE '%active%' 
+         OR s.sta_type IN ('ACTIVE', '4UFF', 'CFKK')
     `);
     const activeSubscribers = activeResult[0].active;
 
     // Tổng doanh thu
-    const [revenueResult] = await db.query('SELECT SUM(pck_charge) as revenue FROM subscribers WHERE pck_charge IS NOT NULL');
+    const [revenueResult] = await db.query(
+      'SELECT SUM(pck_charge) as revenue FROM subscribers WHERE pck_charge IS NOT NULL'
+    );
     const totalRevenue = revenueResult[0].revenue || 0;
 
-    // Tính tỷ lệ tăng trưởng (so sánh với tháng trước)
+    // Thuê bao mới tháng này
     const [currentMonthResult] = await db.query(`
       SELECT COUNT(*) as current_month 
       FROM subscribers 
       WHERE DATE_FORMAT(sta_date, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')
     `);
+
+    // Thuê bao mới tháng trước
     const [lastMonthResult] = await db.query(`
       SELECT COUNT(*) as last_month 
       FROM subscribers 
       WHERE DATE_FORMAT(sta_date, '%Y-%m') = DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MONTH), '%Y-%m')
     `);
-    
+
     const currentMonth = currentMonthResult[0].current_month || 0;
-    const lastMonth = lastMonthResult[0].last_month || 1; // Tránh chia cho 0
+    const lastMonth = lastMonthResult[0].last_month || 1; // tránh chia 0
     const growthRate = ((currentMonth - lastMonth) / lastMonth * 100).toFixed(1);
 
-    const kpiData = {
+    res.json({
       totalSubscribers: parseInt(totalSubscribers),
       activeSubscribers: parseInt(activeSubscribers),
       totalRevenue: parseFloat(totalRevenue),
       growthRate: parseFloat(growthRate)
-    };
-
-    res.json(kpiData);
+    });
   } catch (err) {
-    console.error('KPI API Error:', err);
+    console.error('Error in /api/kpi:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ...Thêm các API khác nếu cần...
-
-const PORT = 3000;
+// ✅ Start server (Render yêu cầu PORT từ env)
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Backend API running at http://localhost:${PORT}`);
+  console.log(`Backend API running on port ${PORT}`);
 });
