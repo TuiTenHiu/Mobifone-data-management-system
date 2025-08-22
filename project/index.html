@@ -1,12 +1,32 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
   <head>
     <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+
+    <title>Mobifone Data Management</title>
+    <meta name="description" content="Hệ thống quản lý thuê bao & doanh thu Mobifone" />
+
+    <!-- Favicon (fallback) -->
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Mobile Subscriber Monitoring Dashboard</title>
+
+    <!-- PWA theme color (màu thanh địa chỉ Android, splash iOS) -->
+    <meta name="theme-color" content="#2563eb" />
+
+    <!-- iOS PWA -->
+    <link rel="apple-touch-icon" href="/pwa-192x192.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+
+    <!-- Manifest (vite-plugin-pwa sẽ tự chèn khi build, nhưng thêm thủ công cũng OK) -->
+    <link rel="manifest" href="/manifest.webmanifest" />
   </head>
+
   <body>
+    <noscript>Ứng dụng cần bật JavaScript để hoạt động.</noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
