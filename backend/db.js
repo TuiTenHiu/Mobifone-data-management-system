@@ -4,7 +4,7 @@ const mysql = require('mysql2');
 const must = ['DB_HOST','DB_PORT','DB_USER','DB_PASSWORD','DB_NAME'];
 for (const k of must) if (!process.env[k]) console.warn('ENV MISSING:', k);
 
-const pool = mysql.createPool({
+const dbConfig = {
   host: process.env.DB_HOST,                 // maglev.proxy.rlwy.net
   port: Number(process.env.DB_PORT || 3306), // 38827
   user: process.env.DB_USER,                 // root
@@ -13,17 +13,18 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  connectTimeout: 20000,
-  ssl: { rejectUnauthorized: false, minVersion: 'TLSv1.2' }, // bắt buộc với Railway public
-});
+  connectTimeout: 20000,                     // 20s
+  ssl: { rejectUnauthorized: false, minVersion: 'TLSv1.2' }, // QUAN TRỌNG cho Railway public
+};
 
 console.log('DB config (safe):', {
-  host: process.env.DB_HOST,
-  port: process.env.DB_PORT,
-  user: process.env.DB_USER,
-  database: process.env.DB_NAME,
+  host: dbConfig.host, port: dbConfig.port,
+  user: dbConfig.user, database: dbConfig.database
 });
 
+const pool = mysql.createPool(dbConfig);
+
+// Kiểm tra kết nối khi khởi động
 pool.getConnection((err, conn) => {
   if (err) {
     console.error('Kết nối DB thất bại:', {
