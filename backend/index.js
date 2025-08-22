@@ -7,6 +7,8 @@ app.use(cors());
 app.use(express.json());
 
 console.log('Đã khởi động file index.js');
+console.log('[BOOT] DB module path =', require.resolve('./db')); // đường dẫn file db đang được load
+
 
 // ✅ Route test
 app.get('/', (req, res) => {
