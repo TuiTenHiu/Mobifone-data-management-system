@@ -1,5 +1,6 @@
 // db.js
 const mysql = require('mysql2');
+const dns = require('dns');
 
 const must = ['DB_HOST','DB_PORT','DB_USER','DB_PASSWORD','DB_NAME'];
 for (const k of must) if (!process.env[k]) console.warn('ENV MISSING:', k);
@@ -13,8 +14,11 @@ const dbConfig = {
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  connectTimeout: 20000,                     // 20s
-  ssl: { rejectUnauthorized: false, minVersion: 'TLSv1.2' }, // QUAN TRỌNG cho Railway public
+  connectTimeout: 20000,
+  // BẮT BUỘC với Railway public
+  ssl: { rejectUnauthorized: false, minVersion: 'TLSv1.2' },
+  // ÉP dùng IPv4 kể cả khi DNS trả về IPv6
+  lookup: (hostname, options, cb) => dns.lookup(hostname, { family: 4, all: false }, cb),
 };
 
 console.log('DB config (safe):', {
@@ -24,7 +28,7 @@ console.log('DB config (safe):', {
 
 const pool = mysql.createPool(dbConfig);
 
-// Kiểm tra kết nối khi khởi động
+// Ping kết nối khi khởi động
 pool.getConnection((err, conn) => {
   if (err) {
     console.error('Kết nối DB thất bại:', {
