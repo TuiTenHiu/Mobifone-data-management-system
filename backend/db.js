@@ -1,51 +1,24 @@
-// backend/db.js
-const mysql = require('mysql2/promise'); // dùng phiên bản promise
-
-// Ưu tiên đọc DATABASE_URL nếu bạn dùng dạng URL,
-// còn không thì dùng các biến rời DB_HOST/PORT/USER/PASSWORD/NAME
-function getConfigFromEnv() {
-  const { DATABASE_URL, DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME } = process.env;
-
-  if (DATABASE_URL) {
-    const url = new URL(DATABASE_URL); // ví dụ: mysql://user:pass@host:port/db
-    return {
-      host: url.hostname,
-      port: Number(url.port || 3306),
-      user: url.username,
-      password: url.password,
-      database: url.pathname.replace('/', ''),
-    };
-  }
-
-  return {
-    host: DB_HOST || 'localhost',
-    port: Number(DB_PORT) || 3306,
-    user: DB_USER || 'root',
-    password: DB_PASSWORD || '',
-    database: DB_NAME || 'dashboard_db',
-  };
-}
+const mysql = require('mysql2');
 
 const pool = mysql.createPool({
-  ...getConfigFromEnv(),
+  host: process.env.DB_HOST,      // mysql.railway.internal
+  user: process.env.DB_USER,      // root
+  password: process.env.DB_PASSWORD,  // password Railway
+  database: process.env.DB_NAME,  // railway
+  port: process.env.DB_PORT || 3306,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0,
-  // Một số host cần mở khóa public key:
-  // enable bằng cách set DB_ALLOW_PUBLIC_KEY=true nếu cần
-  ...(process.env.DB_SSL === 'true' ? { ssl: { rejectUnauthorized: false } } : {}),
-  ...(process.env.DB_ALLOW_PUBLIC_KEY === 'true' ? { insecureAuth: true, authPlugins: { mysql_clear_password: () => () => process.env.DB_PASSWORD } } : {}),
+  queueLimit: 0
 });
 
-// Kiểm tra kết nối khi khởi động
-(async () => {
-  try {
-    const conn = await pool.getConnection();
-    console.log('Kết nối database thành công!');
-    conn.release();
-  } catch (err) {
+// Kiểm tra kết nối
+pool.getConnection((err, connection) => {
+  if (err) {
     console.error('Kết nối database thất bại:', err.message);
+  } else {
+    console.log('Kết nối database thành công!');
+    connection.release();
   }
-})();
+});
 
-module.exports = pool;
+module.exports = pool.promise();
