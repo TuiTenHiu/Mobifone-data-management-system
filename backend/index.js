@@ -7,7 +7,10 @@ app.use(cors());
 app.use(express.json());
 
 console.log('Đã khởi động file index.js');
-console.log('[BOOT] DB module path =', require.resolve('./db')); // đường dẫn file db đang được load
+// In thông tin môi trường để kiểm tra
+console.log('[BOOT] CWD =', process.cwd());
+console.log('[BOOT] DB module path =', require.resolve('./db')); // sửa './db' nếu file db.js ở chỗ khác
+console.log('[BOOT] ENV safe =', { DB_HOST: process.env.DB_HOST, DB_PORT: process.env.DB_PORT, DB_USER: process.env.DB_USER, DB_NAME: process.env.DB_NAME });
 
 
 // ✅ Route test
