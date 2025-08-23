@@ -4,7 +4,7 @@
 const express = require('express');
 const cors = require('cors');
 
-// ===== Boot logs =====
+// ===== Boot logs (an toàn, không in mật khẩu) =====
 console.log('[BOOT] CWD =', process.cwd());
 console.log('[BOOT] ENV (safe) =', {
   DB_HOST: process.env.DB_HOST,
@@ -23,17 +23,11 @@ function loadDb() {
   const candidates = ['./db', './backend/db', '../backend/db', '../db'];
   for (const p of candidates) {
     try {
-      // require thử
       const mod = require(p);
-      // in ra đường dẫn đã resolve để debug
       console.log('[BOOT] DB module path =', require.resolve(p));
       return mod;
     } catch (err) {
-      if (err?.code !== 'MODULE_NOT_FOUND') {
-        // lỗi khác (không phải không tìm thấy module) -> ném luôn để biết
-        throw err;
-      }
-      // nếu MODULE_NOT_FOUND thì thử candidate tiếp theo
+      if (err?.code !== 'MODULE_NOT_FOUND') throw err;
     }
   }
   throw new Error(`Không tìm thấy db.js. Đã thử: ${candidates.join(', ')}`);
@@ -46,31 +40,59 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// (tùy chọn) timeout nhẹ để tránh requests treo lâu
+app.use((req, res, next) => {
+  req.setTimeout(30_000); // 30s
+  res.setTimeout(30_000);
+  next();
+});
+
 console.log('Đã khởi động file index.js');
 
-// Health/test
+// ===== Health & test =====
 app.get('/', (_req, res) => {
   res.send('Backend API is running on Render!');
 });
 
-// Debug DB (xong việc có thể xoá)
+// Liveness
+app.get('/api/healthz', (_req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Readiness (có kiểm tra DB)
+app.get('/api/readyz', async (_req, res) => {
+  try {
+    await db.query('SELECT 1');
+    res.status(200).json({ status: 'ready' });
+  } catch (e) {
+    res.status(503).json({ status: 'db_down', error: e.code || e.message });
+  }
+});
+
+// Debug DB (xong có thể xoá)
 app.get('/_debug/db', async (_req, res) => {
   try {
     const [r] = await db.query('SELECT 1 AS ok');
     res.json({ ok: r?.[0]?.ok === 1 });
   } catch (e) {
-    res.status(500).json({
-      err: { code: e.code, errno: e.errno, message: e.message }
-    });
+    res.status(500).json({ err: { code: e.code, errno: e.errno, message: e.message } });
   }
 });
 
 // ===== APIs =====
 
-// Danh sách thuê bao
-app.get('/api/subscribers', async (_req, res) => {
+// Danh sách thuê bao (có phân trang nhẹ)
+app.get('/api/subscribers', async (req, res) => {
   try {
-    const [rows] = await db.query(`
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '100', 10), 1), 1000); // 1..1000
+    const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
+
+    const [rows] = await db.query(
+      `
       SELECT 
         s.sub_id     AS SUB_ID,
         s.type       AS TYPE,
@@ -90,8 +112,13 @@ app.get('/api/subscribers', async (_req, res) => {
       LEFT JOIN sta_type  st ON s.sta_type = st.sta_type
       LEFT JOIN sub_type  su ON s.sub_type = su.sub_type
       LEFT JOIN district   d ON s.province = d.province AND s.district = d.district
-    `);
-    res.json(rows);
+      ORDER BY s.sub_id
+      LIMIT ? OFFSET ?
+      `,
+      [limit, offset]
+    );
+
+    res.json({ limit, offset, count: rows.length, data: rows });
   } catch (err) {
     console.error('Error in /api/subscribers:', err);
     res.status(500).json({ error: err.message });
@@ -101,7 +128,7 @@ app.get('/api/subscribers', async (_req, res) => {
 // Danh sách tỉnh
 app.get('/api/provinces', async (_req, res) => {
   try {
-    const [rows] = await db.query('SELECT DISTINCT province FROM district');
+    const [rows] = await db.query('SELECT DISTINCT province FROM district ORDER BY province');
     res.json(rows);
   } catch (err) {
     console.error('Error in /api/provinces:', err);
@@ -112,9 +139,10 @@ app.get('/api/provinces', async (_req, res) => {
 // Danh sách quận/huyện theo tỉnh
 app.get('/api/districts', async (req, res) => {
   const { province } = req.query;
+  if (!province) return res.status(400).json({ error: 'Missing query param: province' });
   try {
     const [rows] = await db.query(
-      'SELECT district, full_name FROM district WHERE province = ?',
+      'SELECT district, full_name FROM district WHERE province = ? ORDER BY district',
       [province]
     );
     res.json(rows);
@@ -128,9 +156,7 @@ app.get('/api/districts', async (req, res) => {
 app.get('/api/kpi', async (_req, res) => {
   try {
     // Tổng TB
-    const [totalResult] = await db.query(
-      'SELECT COUNT(*) AS total FROM subscribers'
-    );
+    const [totalResult] = await db.query('SELECT COUNT(*) AS total FROM subscribers');
     const totalSubscribers = Number(totalResult?.[0]?.total || 0);
 
     // TB đang hoạt động
@@ -174,12 +200,22 @@ app.get('/api/kpi', async (_req, res) => {
       totalSubscribers,
       activeSubscribers,
       totalRevenue,
-      growthRate
+      growthRate,
     });
   } catch (err) {
     console.error('Error in /api/kpi:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ===== 404 & Error handler =====
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not Found', path: req.originalUrl });
+});
+
+app.use((err, _req, res, _next) => {
+  console.error('[UNCAUGHT ERROR]', err);
+  res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
 // ===== Listen =====
