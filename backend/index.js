@@ -1,41 +1,73 @@
-// index.js (entrypoint ở root)
+// index.js
+'use strict';
+
 const express = require('express');
 const cors = require('cors');
 
-// 👉 nếu bạn để db.js ở chỗ khác, đổi đường dẫn dưới đây cho khớp
+// ===== Boot logs =====
 console.log('[BOOT] CWD =', process.cwd());
-console.log('[BOOT] DB module path =', require.resolve('./backend/db'));
-console.log('[BOOT] ENV safe =', {
+console.log('[BOOT] ENV (safe) =', {
   DB_HOST: process.env.DB_HOST,
   DB_PORT: process.env.DB_PORT,
   DB_USER: process.env.DB_USER,
   DB_NAME: process.env.DB_NAME,
 });
 
-const db = require('./backend/db');
+/**
+ * Tìm & nạp module DB (db.js) ở nhiều vị trí ứng viên.
+ * Hỗ trợ cả hai kiểu chạy:
+ *  - Root Directory = backend  -> require('./db')
+ *  - Start từ repo root       -> require('./backend/db')
+ */
+function loadDb() {
+  const candidates = ['./db', './backend/db', '../backend/db', '../db'];
+  for (const p of candidates) {
+    try {
+      // require thử
+      const mod = require(p);
+      // in ra đường dẫn đã resolve để debug
+      console.log('[BOOT] DB module path =', require.resolve(p));
+      return mod;
+    } catch (err) {
+      if (err?.code !== 'MODULE_NOT_FOUND') {
+        // lỗi khác (không phải không tìm thấy module) -> ném luôn để biết
+        throw err;
+      }
+      // nếu MODULE_NOT_FOUND thì thử candidate tiếp theo
+    }
+  }
+  throw new Error(`Không tìm thấy db.js. Đã thử: ${candidates.join(', ')}`);
+}
 
+const db = loadDb();
+
+// ===== App =====
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 console.log('Đã khởi động file index.js');
 
-// Route test
+// Health/test
 app.get('/', (_req, res) => {
   res.send('Backend API is running on Render!');
 });
 
-// Debug DB (có thể bỏ đi sau khi xong)
+// Debug DB (xong việc có thể xoá)
 app.get('/_debug/db', async (_req, res) => {
   try {
     const [r] = await db.query('SELECT 1 AS ok');
-    res.json({ ok: r[0]?.ok === 1 });
+    res.json({ ok: r?.[0]?.ok === 1 });
   } catch (e) {
-    res.status(500).json({ err: { code: e.code, errno: e.errno, message: e.message } });
+    res.status(500).json({
+      err: { code: e.code, errno: e.errno, message: e.message }
+    });
   }
 });
 
-// Lấy danh sách thuê bao
+// ===== APIs =====
+
+// Danh sách thuê bao
 app.get('/api/subscribers', async (_req, res) => {
   try {
     const [rows] = await db.query(`
@@ -66,7 +98,7 @@ app.get('/api/subscribers', async (_req, res) => {
   }
 });
 
-// Lấy danh sách tỉnh
+// Danh sách tỉnh
 app.get('/api/provinces', async (_req, res) => {
   try {
     const [rows] = await db.query('SELECT DISTINCT province FROM district');
@@ -77,7 +109,7 @@ app.get('/api/provinces', async (_req, res) => {
   }
 });
 
-// Lấy danh sách quận/huyện theo tỉnh
+// Danh sách quận/huyện theo tỉnh
 app.get('/api/districts', async (req, res) => {
   const { province } = req.query;
   try {
@@ -95,9 +127,13 @@ app.get('/api/districts', async (req, res) => {
 // KPI
 app.get('/api/kpi', async (_req, res) => {
   try {
-    const [totalResult] = await db.query('SELECT COUNT(*) AS total FROM subscribers');
-    const totalSubscribers = totalResult[0]?.total || 0;
+    // Tổng TB
+    const [totalResult] = await db.query(
+      'SELECT COUNT(*) AS total FROM subscribers'
+    );
+    const totalSubscribers = Number(totalResult?.[0]?.total || 0);
 
+    // TB đang hoạt động
     const [activeResult] = await db.query(`
       SELECT COUNT(*) AS active 
       FROM subscribers s
@@ -106,32 +142,37 @@ app.get('/api/kpi', async (_req, res) => {
          OR st.name LIKE '%active%' 
          OR s.sta_type IN ('ACTIVE', '4UFF', 'CFKK')
     `);
-    const activeSubscribers = activeResult[0]?.active || 0;
+    const activeSubscribers = Number(activeResult?.[0]?.active || 0);
 
-    const [revenueResult] = await db.query(
-      'SELECT SUM(pck_charge) AS revenue FROM subscribers WHERE pck_charge IS NOT NULL'
-    );
-    const totalRevenue = Number(revenueResult[0]?.revenue || 0);
+    // Doanh thu
+    const [revenueResult] = await db.query(`
+      SELECT SUM(pck_charge) AS revenue 
+      FROM subscribers 
+      WHERE pck_charge IS NOT NULL
+    `);
+    const totalRevenue = Number(revenueResult?.[0]?.revenue || 0);
 
+    // Thuê bao mới tháng này
     const [currentMonthResult] = await db.query(`
       SELECT COUNT(*) AS current_month 
       FROM subscribers 
       WHERE DATE_FORMAT(sta_date, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')
     `);
-    const currentMonth = currentMonthResult[0]?.current_month || 0;
+    const currentMonth = Number(currentMonthResult?.[0]?.current_month || 0);
 
+    // Thuê bao mới tháng trước
     const [lastMonthResult] = await db.query(`
       SELECT COUNT(*) AS last_month 
       FROM subscribers 
       WHERE DATE_FORMAT(sta_date, '%Y-%m') = DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MONTH), '%Y-%m')
     `);
-    const lastMonth = lastMonthResult[0]?.last_month || 1; // tránh chia 0
+    const lastMonth = Number(lastMonthResult?.[0]?.last_month || 1); // tránh chia 0
 
     const growthRate = Number((((currentMonth - lastMonth) / lastMonth) * 100).toFixed(1));
 
     res.json({
-      totalSubscribers: Number(totalSubscribers),
-      activeSubscribers: Number(activeSubscribers),
+      totalSubscribers,
+      activeSubscribers,
       totalRevenue,
       growthRate
     });
@@ -141,7 +182,7 @@ app.get('/api/kpi', async (_req, res) => {
   }
 });
 
-// Start server
+// ===== Listen =====
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Backend API running on port ${PORT}`);
