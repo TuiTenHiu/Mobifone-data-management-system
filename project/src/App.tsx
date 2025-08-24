@@ -1,7 +1,8 @@
 // src/App.tsx
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+
 import Sidebar from './components/Layout/Sidebar';
-import Header from './components/Layout/Header';
+import Header, { ExportFormat } from './components/Layout/Header';
 import KPICards from './components/Dashboard/KPICards';
 import FilterBar from './components/Dashboard/FilterBar';
 import BarChartComponent from './components/Charts/BarChart';
@@ -9,219 +10,304 @@ import LineChartComponent from './components/Charts/LineChart';
 import DataTable from './components/Tables/DataTable';
 import Spinner from './components/Layout/Spinner';
 
-import { FilterParams, KPIData } from './types';
 import api from './axios';
+import { FilterParams, KPIData } from './types';
+
+// Kiểu dữ liệu thuê bao (coi như any nếu bạn chưa có types đầy đủ)
+type SubscriberRow = any;
 
 type TabKey = 'dashboard' | 'subscribers' | 'analytics' | string;
 
-function App() {
+const App: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
 
-  // filters FE
+  // Bộ lọc hiện tại
   const [filters, setFilters] = useState<FilterParams>({});
 
-  // phân trang server
-  const [page, setPage] = useState<number>(1);
-  const [limit, setLimit] = useState<number>(100); // page size mặc định
-  const [total, setTotal] = useState<number>(0);
-
-  // data
-  const [subscriberData, setSubscriberData] = useState<any[]>([]);
+  // Dữ liệu thuê bao (đã lọc + phân trang từ server)
+  const [subscriberData, setSubscriberData] = useState<SubscriberRow[]>([]);
   const [kpiData, setKpiData] = useState<KPIData | null>(null);
+
+  // Trạng thái tải & phân trang
   const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState<number>(1);
+  const [limit, setLimit] = useState<number>(100); // có thể cho người dùng chọn 50/100/200...
+  const [total, setTotal] = useState<number>(0);
+  const [hasMore, setHasMore] = useState<boolean>(false);
 
-  /** Chuẩn hoá filter để truyền lên API (bỏ 'Tất cả', định dạng ngày) */
-  const normFilters = (f: FilterParams) => {
+  // ---- Helpers --------------------------------------------------------------
+  const sanitizeFilters = (f: FilterParams) => {
+    // Chuyển 'Tất cả' -> undefined để server không filter
     const norm = (v?: string) => (v && v !== 'Tất cả' ? v : undefined);
-    const toDate = (v?: string) =>
-      v ? new Date(v).toISOString().slice(0, 10) : undefined;
-
     return {
       type: norm(f.type),
       province: norm(f.province),
       district: norm(f.district),
-      startDate: toDate(f.startDate),
-      endDate: toDate(f.endDate),
+      startDate: f.startDate || undefined,
+      endDate: f.endDate || undefined,
     };
   };
 
-  /** Bóc dữ liệu + tổng từ nhiều kiểu payload thường gặp */
-  const parseSubRes = (res: any) => {
-    const payload = res?.data ?? res;
-    const data =
-      Array.isArray(payload) ? payload :
-      payload?.data ?? payload?.rows ?? [];
-    const total =
-      payload?.total ?? payload?.count ?? payload?.meta?.total ?? data.length;
-    return { data, total };
-  };
-
-  /** Tải KPI (toàn cục) */
   const fetchKPI = async () => {
-    try {
-      const kpiRes = await api.get('/api/kpi');
-      setKpiData(kpiRes.data);
-    } catch {
-      setKpiData(null);
-    }
+    const res = await api.get('/api/kpi');
+    return res.data as KPIData;
   };
 
-  /** Tải danh sách thuê bao theo filter + phân trang */
-  const fetchSubscribers = async (f: FilterParams, p: number, l: number) => {
-    const params = { ...normFilters(f), page: p, limit: l };
+  const fetchSubscribers = async ({
+    page,
+    limit,
+    filters,
+  }: {
+    page: number;
+    limit: number;
+    filters: FilterParams;
+  }) => {
+    const params = {
+      page,
+      limit,
+      ...sanitizeFilters(filters),
+    };
+
     const res = await api.get('/api/subscribers', { params });
-    return parseSubRes(res);
+
+    // Server recommended payload:
+    // { total, page, limit, hasMore, data: [...] }
+    const payload = res.data;
+    const rows: SubscriberRow[] = Array.isArray(payload)
+      ? payload
+      : payload?.data ?? [];
+
+    return {
+      rows,
+      total: payload?.total ?? rows.length,
+      hasMore: payload?.hasMore ?? false,
+    };
   };
 
-  /** Lần đầu: “đánh thức” backend free, tải KPI & trang đầu */
+  const firstItemIndex = useMemo(
+    () => (total === 0 ? 0 : (page - 1) * limit + 1),
+    [page, limit, total]
+  );
+  const lastItemIndex = useMemo(
+    () => Math.min(page * limit, total),
+    [page, limit, total]
+  );
+
+  // ---- Side effects: tải KPI + thuê bao ------------------------------------
   useEffect(() => {
-    let alive = true;
-    (async () => {
+    const load = async () => {
       try {
         setLoading(true);
-        await api.get('/api/readyz').catch(() => {}); // wake up
-        await fetchKPI();
-        const { data, total } = await fetchSubscribers(filters, page, limit);
-        if (!alive) return;
-        setSubscriberData(data);
-        setTotal(total);
-      } catch (e) {
-        if (!alive) return;
+
+        // “Đánh thức” backend free nếu cần
+        await api.get('/api/readyz').catch(() => {});
+
+        const [kpi, subs] = await Promise.all([
+          fetchKPI(),
+          fetchSubscribers({ page, limit, filters }),
+        ]);
+
+        setKpiData(kpi);
+        setSubscriberData(subs.rows);
+        setTotal(subs.total);
+        setHasMore(subs.hasMore);
+      } catch (err) {
+        console.error('[FE] load error:', err);
         setSubscriberData([]);
         setTotal(0);
+        setHasMore(false);
+        setKpiData(null);
       } finally {
-        if (alive) setLoading(false);
+        setLoading(false);
       }
-    })();
-    return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    };
 
-  /** Mỗi khi filter/page/limit đổi → tải lại danh sách */
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        setLoading(true);
-        const { data, total } = await fetchSubscribers(filters, page, limit);
-        if (!alive) return;
-        setSubscriberData(data);
-        setTotal(total);
-      } catch {
-        if (!alive) return;
-        setSubscriberData([]);
-        setTotal(0);
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => { alive = false; };
-  }, [filters, page, limit]);
+    load();
+  }, [page, limit, filters]);
 
-  /** Khi đổi filter từ FilterBar → reset về trang 1 */
+  // Khi đổi filter thì quay về page 1
   const onFilterChange = (next: FilterParams) => {
     setFilters(next);
     setPage(1);
   };
 
-  /** Làm mới cả KPI và trang hiện tại */
+  const handleFilterReset = () => {
+    setFilters({});
+    setPage(1);
+  };
+
   const handleRefresh = async () => {
+    // chỉ cần kích hoạt lại useEffect
+    setPage((p) => p); // trick nhỏ để trigger nhưng thường không cần
+  };
+
+  // ---- Export helpers -------------------------------------------------------
+  const exportToCSV = (rows: any[], filename = 'subscribers.csv') => {
+    if (!rows?.length) return;
+    const cols = Object.keys(rows[0]);
+    const header = cols.join(',');
+    const body = rows
+      .map((r) =>
+        cols
+          .map((c) => {
+            const raw = r[c] ?? '';
+            const cell = String(raw).replace(/"/g, '""');
+            if (cell.search(/("|,|\n)/g) >= 0) return `"${cell}"`;
+            return cell;
+          })
+          .join(',')
+      )
+      .join('\n');
+    const csv = `${header}\n${body}`;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportToExcel = async (rows: any[], filename = 'subscribers.xlsx') => {
+    if (!rows?.length) return;
+    const XLSX = await import('xlsx');
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Data');
+    XLSX.writeFile(wb, filename);
+  };
+
+  const exportToPDF = async (rows: any[], filename = 'subscribers.pdf') => {
+    if (!rows?.length) return;
+    const jsPDF = (await import('jspdf')).default;
+    await import('jspdf-autotable');
+
+    const doc = new jsPDF({ orientation: 'landscape' });
+
+    const cols = [
+      'SUB_ID',
+      'TYPE',
+      'STA_TYPE',
+      'SUB_TYPE',
+      'STA_DATE',
+      'END_DATE',
+      'PROVINCE',
+      'DISTRICT',
+      'PCK_CODE',
+      'PCK_DATE',
+      'PCK_CHARGE',
+    ].filter((c) => c in rows[0]);
+
+    const tableRows = rows.map((r) => cols.map((c) => r[c] ?? ''));
+
+    // @ts-expect-error (plugin adds autoTable to jsPDF instance)
+    doc.autoTable({
+      head: [cols],
+      body: tableRows,
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [33, 150, 243] },
+      startY: 14,
+      theme: 'grid',
+    });
+
+    doc.text('Báo cáo thuê bao', 14, 10);
+    doc.save(filename);
+  };
+
+  const handleExport = async (format: ExportFormat) => {
     try {
-      setLoading(true);
-      await api.get('/api/readyz').catch(() => {});
-      await fetchKPI();
-      const { data, total } = await fetchSubscribers(filters, page, limit);
-      setSubscriberData(data);
-      setTotal(total);
-    } catch {
-      setSubscriberData([]);
-      setTotal(0);
-    } finally {
-      setLoading(false);
+      if (!subscriberData.length) return;
+      if (format === 'csv') return exportToCSV(subscriberData);
+      if (format === 'excel') return exportToExcel(subscriberData);
+      if (format === 'pdf') return exportToPDF(subscriberData);
+    } catch (e) {
+      console.error('[Export] Lỗi xuất file:', e);
+      alert(
+        'Không thể xuất file. Hãy đảm bảo đã cài đặt "xlsx", "jspdf" và "jspdf-autotable" nếu bạn chọn Excel/PDF.'
+      );
     }
   };
 
-  /** Export (tuỳ bạn triển khai thêm) */
-  const handleExport = () => {
-    console.log('Exporting…', { filters, page, limit, total });
-  };
-
-  /** Tính dữ liệu biểu đồ từ trang hiện tại */
+  // ---- Dữ liệu biểu đồ -----------------------------------------------------
   const provinceChartData = useMemo(() => {
-    const m: Record<string, number> = {};
-    for (const it of subscriberData) {
-      const k = it.PROVINCE ?? 'N/A';
-      m[k] = (m[k] || 0) + 1;
+    const count: Record<string, number> = {};
+    for (const r of subscriberData) {
+      const key = r.PROVINCE || 'N/A';
+      count[key] = (count[key] || 0) + 1;
     }
-    return Object.entries(m).map(([name, value]) => ({ name, value }));
+    return Object.entries(count).map(([name, value]) => ({
+      name,
+      value: Number(value),
+    }));
   }, [subscriberData]);
 
   const revenueChartData = useMemo(() => {
-    const m: Record<string, number> = {};
-    for (const it of subscriberData) {
-      const month = it.STA_DATE ? String(it.STA_DATE).slice(0, 7) : '';
+    const monthSum: Record<string, number> = {};
+    for (const r of subscriberData) {
+      const month = r.STA_DATE ? String(r.STA_DATE).substring(0, 7) : '';
       if (!month) continue;
-      m[month] = (m[month] || 0) + Number(it.PCK_CHARGE || 0);
+      monthSum[month] = (monthSum[month] || 0) + Number(r.PCK_CHARGE || 0);
     }
-    return Object.entries(m)
+    return Object.entries(monthSum)
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, value]) => ({ name, value }));
+      .map(([name, value]) => ({ name, value: Number(value) }));
   }, [subscriberData]);
 
-  /** Pager helpers */
-  const totalPages = Math.max(1, Math.ceil(total / limit));
-  const canPrev = page > 1;
-  const canNext = page < totalPages;
+  // ---- Render pages ---------------------------------------------------------
+  const TableWithPagination = (
+    <>
+      {loading ? (
+        <Spinner />
+      ) : (
+        <>
+          <DataTable
+            data={subscriberData}
+            title={`Danh sách thuê bao (${firstItemIndex}-${lastItemIndex}/${total})`}
+          />
+          <div className="flex items-center justify-between mt-4">
+            <div className="text-sm text-gray-600">
+              Hiển thị <b>{firstItemIndex}</b>–<b>{lastItemIndex}</b> /{' '}
+              <b>{total}</b>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="px-3 py-1 rounded border text-sm hover:bg-gray-50 disabled:opacity-50"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1 || loading}
+              >
+                Trang trước
+              </button>
+              <span className="text-sm text-gray-700">Trang {page}</span>
+              <button
+                className="px-3 py-1 rounded border text-sm hover:bg-gray-50 disabled:opacity-50"
+                onClick={() => setPage((p) => p + 1)}
+                disabled={!hasMore || loading}
+              >
+                Trang sau
+              </button>
+              <select
+                className="ml-2 border rounded px-2 py-1 text-sm"
+                value={limit}
+                onChange={(e) => {
+                  setLimit(Number(e.target.value));
+                  setPage(1);
+                }}
+              >
+                {[50, 100, 200, 500].map((n) => (
+                  <option key={n} value={n}>
+                    {n}/trang
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
 
   const renderContent = () => {
-    const contentTable = (
-      <>
-        {loading ? (
-          <Spinner />
-        ) : (
-          <>
-            <DataTable
-              data={subscriberData}
-              title={`Danh sách thuê bao — trang ${page}/${totalPages} (${total.toLocaleString()} bản ghi)`}
-            />
-            {/* Pager đơn giản */}
-            <div className="mt-4 flex items-center justify-between gap-3">
-              <div className="text-sm text-gray-600">
-                Tổng: <b>{total.toLocaleString()}</b> • Trang: <b>{page}</b> / {totalPages}
-              </div>
-              <div className="flex items-center gap-2">
-                <label className="text-sm text-gray-600">Page size:</label>
-                <select
-                  className="border rounded px-2 py-1 text-sm"
-                  value={limit}
-                  onChange={(e) => { setPage(1); setLimit(Number(e.target.value)); }}
-                >
-                  {[50, 100, 200, 500, 1000].map(n => (
-                    <option key={n} value={n}>{n}</option>
-                  ))}
-                </select>
-                <button
-                  className="px-3 py-1 rounded border disabled:opacity-50"
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
-                  disabled={!canPrev}
-                >
-                  Prev
-                </button>
-                <button
-                  className="px-3 py-1 rounded border disabled:opacity-50"
-                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                  disabled={!canNext}
-                >
-                  Next
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </>
-    );
-
     switch (activeTab) {
       case 'dashboard':
         return (
@@ -230,7 +316,7 @@ function App() {
             <FilterBar
               filters={filters}
               onFilterChange={onFilterChange}
-              onReset={() => { setFilters({}); setPage(1); }}
+              onReset={handleFilterReset}
             />
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
               <BarChartComponent
@@ -246,7 +332,7 @@ function App() {
                 xAxisKey="name"
               />
             </div>
-            {contentTable}
+            {TableWithPagination}
           </div>
         );
 
@@ -256,9 +342,9 @@ function App() {
             <FilterBar
               filters={filters}
               onFilterChange={onFilterChange}
-              onReset={() => { setFilters({}); setPage(1); }}
+              onReset={handleFilterReset}
             />
-            {contentTable}
+            {TableWithPagination}
           </div>
         );
 
@@ -308,15 +394,14 @@ function App() {
       <div className="flex-1 flex flex-col overflow-hidden lg:ml-0">
         <Header
           onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
+          onRefresh={handleRefresh}                                                                                                                                                                               
           onExport={handleExport}
-          onRefresh={handleRefresh}
+          exportDisabled={!subscriberData.length}
         />
-        <main className="flex-1 overflow-y-auto p-6">
-          {renderContent()}
-        </main>
+        <main className="flex-1 overflow-y-auto p-6">{renderContent()}</main>
       </div>
     </div>
   );
-}
+};
 
 export default App;
