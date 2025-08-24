@@ -29,3 +29,17 @@ project/src/.env.development
 project/src/data/*.sql
 
 !.env.example
+
+# Node
+node_modules/
+**/node_modules/
+.npm/
+.pnpm-store/
+
+# Env
+.env*
+dist/
+.vite/
+.vercel/
+
+# Build output
