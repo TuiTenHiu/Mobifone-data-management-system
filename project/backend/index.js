@@ -14,30 +14,88 @@ app.get('/', (req, res) => {
 });
 
 // ✅ Lấy danh sách thuê bao
+// ===== /api/subscribers (filters + pagination) =====
 app.get('/api/subscribers', async (req, res) => {
   try {
-    const [rows] = await db.query(`
+    // pagination
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const pageSize = Math.min(
+      Math.max(parseInt(req.query.pageSize || '50', 10), 1),
+      1000
+    );
+    const offset = (page - 1) * pageSize;
+
+    // filters
+    const {
+      type,
+      staType,
+      subType,
+      province,
+      district,
+      startDate,
+      endDate,
+      search,
+    } = req.query;
+
+    const where = [];
+    const params = [];
+
+    if (type)      { where.push('s.type = ?');        params.push(type); }
+    if (staType)   { where.push('s.sta_type = ?');    params.push(staType); }
+    if (subType)   { where.push('s.sub_type = ?');    params.push(subType); }
+    if (province)  { where.push('s.province = ?');    params.push(province); }
+    if (district)  { where.push('s.district = ?');    params.push(district); }
+
+    if (startDate) { where.push('s.sta_date >= ?');   params.push(startDate); }
+    // endDate: lấy < ngày +1 để không lệch TZ
+    if (endDate)   { where.push('s.sta_date < DATE_ADD(?, INTERVAL 1 DAY)'); params.push(endDate); }
+
+    if (search) {
+      where.push('(s.sub_id LIKE ? OR s.pck_code LIKE ?)');
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    const whereSQL = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const countSql = `SELECT COUNT(*) AS total FROM subscribers s ${whereSQL}`;
+    const [countRows] = await db.query(countSql, params);
+    const total = Number(countRows?.[0]?.total || 0);
+
+    const dataSql = `
       SELECT 
-        s.sub_id AS SUB_ID,
-        s.type AS TYPE,
-        s.sta_type AS STA_TYPE,
-        s.sub_type AS SUB_TYPE,
-        s.sta_date AS STA_DATE,
-        s.end_date AS END_DATE,
-        s.province AS PROVINCE,
-        s.district AS DISTRICT,
-        s.pck_code AS PCK_CODE,
-        s.pck_date AS PCK_DATE,
+        s.sub_id     AS SUB_ID,
+        s.type       AS TYPE,
+        s.sta_type   AS STA_TYPE,
+        s.sub_type   AS SUB_TYPE,
+        s.sta_date   AS STA_DATE,
+        s.end_date   AS END_DATE,
+        s.province   AS PROVINCE,
+        s.district   AS DISTRICT,
+        s.pck_code   AS PCK_CODE,
+        s.pck_date   AS PCK_DATE,
         s.pck_charge AS PCK_CHARGE,
-        st.name AS sta_type_name, 
-        su.name AS sub_type_name, 
-        d.full_name AS district_name
+        st.name      AS sta_type_name,
+        su.name      AS sub_type_name,
+        d.full_name  AS district_name
       FROM subscribers s
-      LEFT JOIN sta_type st ON s.sta_type = st.sta_type
-      LEFT JOIN sub_type su ON s.sub_type = su.sub_type
-      LEFT JOIN district d ON s.province = d.province AND s.district = d.district
-    `);
-    res.json(rows);
+      LEFT JOIN sta_type  st ON s.sta_type = st.sta_type
+      LEFT JOIN sub_type  su ON s.sub_type = su.sub_type
+      LEFT JOIN district   d ON s.province = d.province AND s.district = d.district
+      ${whereSQL}
+      ORDER BY s.sub_id
+      LIMIT ? OFFSET ?
+    `;
+
+    const [rows] = await db.query(dataSql, [...params, pageSize, offset]);
+
+    res.json({
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+      hasMore: offset + rows.length < total,
+      data: rows,
+    });
   } catch (err) {
     console.error('Error in /api/subscribers:', err);
     res.status(500).json({ error: err.message });
