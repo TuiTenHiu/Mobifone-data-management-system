@@ -4,7 +4,7 @@ const cors = require('cors');
 const db = require('./db'); // db.js (Postgres): export query(sql, params) -> [rows]
 
 const app = express();
-app.use(cors());
+app.use(cors()); // có thể siết origin sau khi FE deploy ổn định
 app.use(express.json());
 
 console.log('[BOOT] CWD =', process.cwd());
@@ -137,10 +137,9 @@ app.get('/api/districts', async (req, res) => {
 });
 
 // ===== /api/kpi =====
-// Active được tính theo end_date: chưa có hoặc > hôm nay
+// Active = end_date NULL hoặc > hôm nay
 app.get('/api/kpi', async (_req, res) => {
   try {
-    // helper đọc hàng đầu tiên
     const first = (r, key) => Number((r?.[0]?.[key]) ?? 0);
 
     const [t]  = await db.query('SELECT COUNT(*)::int AS total FROM subscribers');
@@ -176,6 +175,41 @@ app.get('/api/kpi', async (_req, res) => {
   } catch (err) {
     console.error('Error in /api/kpi:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== /api/summary/by-district =====
+// Tổng hợp theo huyện; hỗ trợ lọc theo province (?province=QNA)
+app.get('/api/summary/by-district', async (req, res) => {
+  try {
+    const { province } = req.query;
+    const params = [];
+    const where = [];
+
+    if (province) {
+      where.push('s.province = ?');
+      params.push(province);
+    }
+    const whereSQL = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const sql = `
+      SELECT
+        s.province,
+        s.district,
+        COALESCE(d.full_name, s.district) AS district_name,
+        COUNT(*)::int AS total,
+        SUM( CASE WHEN COALESCE(s.end_date, DATE '9999-12-31') > CURRENT_DATE THEN 1 ELSE 0 END )::int AS active
+      FROM subscribers s
+      LEFT JOIN district d ON d.province = s.province AND d.district = s.district
+      ${whereSQL}
+      GROUP BY 1,2,3
+      ORDER BY total DESC, s.district
+    `;
+    const [rows] = await db.query(sql, params);
+    res.json(rows);
+  } catch (e) {
+    console.error('Error in /api/summary/by-district:', e);
+    res.status(500).json({ error: e.message });
   }
 });
 
