@@ -2,70 +2,33 @@
 const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
-const jwt = require('jsonwebtoken');
-const rateLimit = require('express-rate-limit');
-const db = require('./db'); // db.js (Postgres): export query(sql, params) -> [rows]
+const db = require('./db');
+
+const { requireAuth } = require('./middleware/auth');
+const authRoutes = require('./routes/auth');
 
 const app = express();
 
-// --- CORS (cho cookie cross-site) ---
-const isProd = process.env.NODE_ENV === 'production';
-const allowlist = [
-  'http://localhost:5173',
-  process.env.FRONTEND_ORIGIN || '', // ví dụ: https://your-frontend.onrender.com
-].filter(Boolean);
+// CORS cho cookie cross-site
+const allowOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173')
+  .split(',')
+  .map(s => s.trim());
 
 app.use(cors({
-  origin: (origin, cb) => {
-    // Cho phép cả requests không có Origin (curl, health checks)
-    if (!origin) return cb(null, true);
-    return cb(null, allowlist.includes(origin));
-  },
+  origin: allowOrigins,
   credentials: true,
 }));
 
 app.use(express.json());
 app.use(cookieParser());
 
-// --- Cookie & JWT helpers ---
-const cookieOpts = {
-  httpOnly: true,
-  secure: isProd,                // cần HTTPS khi prod
-  sameSite: isProd ? 'none' : 'lax',
-  path: '/',
-  maxAge: 60 * 60 * 1000,        // 1h
-};
-const JWT_SECRET = process.env.JWT_SECRET || 'dev_only_secret_change_me';
-const signToken = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
-const verifyToken = (token) => jwt.verify(token, JWT_SECRET);
-
-const requireAuth = (req, res, next) => {
-  try {
-    const token = req.cookies?.access_token || (req.headers.authorization || '').replace(/^Bearer /, '');
-    if (!token) return res.status(401).json({ error: 'Unauthenticated' });
-    req.user = verifyToken(token); // { uid, email, role, iat, exp }
-    next();
-  } catch (e) {
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-};
-
-const loginLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-// -------- Health checks (không cần auth) --------
 console.log('[BOOT] CWD =', process.cwd());
 console.log('[BOOT] ENV (safe) =', {
   DATABASE_URL: process.env.DATABASE_URL ? 'set' : 'missing',
   DB_POOL_SIZE: process.env.DB_POOL_SIZE || 'default',
-  FRONTEND_ORIGIN: process.env.FRONTEND_ORIGIN || '(none)',
-  NODE_ENV: process.env.NODE_ENV || '(unset)',
 });
 
+// -------- Health checks --------
 app.get('/', (_req, res) => res.send('Backend API is running (Postgres/Neon)'));
 app.get('/api/healthz', (_req, res) => res.json({ status: 'ok' }));
 app.get('/api/readyz', async (_req, res) => {
@@ -77,68 +40,21 @@ app.get('/api/readyz', async (_req, res) => {
   }
 });
 
-// ===================== AUTH =====================
+// -------- Auth routes --------
+app.use('/api/auth', authRoutes);
 
-// Đăng nhập: xác thực bằng pgcrypto (bcrypt) ngay trong SQL
-app.post('/api/auth/login', loginLimiter, async (req, res) => {
-  try {
-    const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: 'Missing email/password' });
+// ===== Protected APIs =====
 
-    // Chỉ trả id,email,role nếu đúng mật khẩu
-    const [rows] = await db.query(
-      'SELECT id, email, role FROM users WHERE email = ? AND password_hash = crypt(?, password_hash)',
-      [email, password]
-    );
-    const user = rows?.[0];
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const token = signToken({ uid: user.id, email: user.email, role: user.role });
-    res.cookie('access_token', token, cookieOpts);
-    res.json(user);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Lấy thông tin phiên đăng nhập (nếu có)
-app.get('/api/auth/me', (req, res) => {
-  try {
-    const token = req.cookies?.access_token || (req.headers.authorization || '').replace(/^Bearer /, '');
-    if (!token) return res.json({ user: null });
-    const payload = verifyToken(token);
-    res.json({ user: { id: payload.uid, email: payload.email, role: payload.role } });
-  } catch (_e) {
-    res.json({ user: null });
-  }
-});
-
-// Đăng xuất: xoá cookie
-app.post('/api/auth/logout', (req, res) => {
-  res.clearCookie('access_token', { ...cookieOpts, maxAge: 0 });
-  res.json({ ok: true });
-});
-
-// ============== API DỮ LIỆU (đã bảo vệ) ==============
-
-// ===== /api/subscribers (filters + pagination) =====
+// /api/subscribers (filters + pagination)
 app.get('/api/subscribers', requireAuth, async (req, res) => {
   try {
-    // pagination
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '50', 10), 1), 1000);
     const offset = (page - 1) * pageSize;
 
-    // filters
     const {
-      type,
-      staType,
-      subType,
-      province,
-      district,
-      startDate,
-      endDate,
-      search,
+      type, staType, subType, province, district,
+      startDate, endDate, search,
     } = req.query;
 
     const where = [];
@@ -160,12 +76,10 @@ app.get('/api/subscribers', requireAuth, async (req, res) => {
 
     const whereSQL = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    // count
     const countSql = `SELECT COUNT(*)::int AS total FROM subscribers s ${whereSQL}`;
     const [countRows] = await db.query(countSql, params);
     const total = Number(countRows?.[0]?.total || 0);
 
-    // data
     const dataSql = `
       SELECT 
         s.sub_id     AS "SUB_ID",
@@ -206,7 +120,7 @@ app.get('/api/subscribers', requireAuth, async (req, res) => {
   }
 });
 
-// ===== /api/provinces =====
+// /api/provinces
 app.get('/api/provinces', requireAuth, async (_req, res) => {
   try {
     const [rows] = await db.query('SELECT DISTINCT province FROM district ORDER BY province');
@@ -217,7 +131,7 @@ app.get('/api/provinces', requireAuth, async (_req, res) => {
   }
 });
 
-// ===== /api/districts?province=... =====
+// /api/districts?province=...
 app.get('/api/districts', requireAuth, async (req, res) => {
   const { province } = req.query;
   try {
@@ -232,7 +146,7 @@ app.get('/api/districts', requireAuth, async (req, res) => {
   }
 });
 
-// ===== /api/kpi =====
+// /api/kpi
 app.get('/api/kpi', requireAuth, async (_req, res) => {
   try {
     const first = (r, key) => Number((r?.[0]?.[key]) ?? 0);
@@ -270,40 +184,6 @@ app.get('/api/kpi', requireAuth, async (_req, res) => {
   } catch (err) {
     console.error('Error in /api/kpi:', err);
     res.status(500).json({ error: err.message });
-  }
-});
-
-// ===== /api/summary/by-district =====
-app.get('/api/summary/by-district', requireAuth, async (req, res) => {
-  try {
-    const { province } = req.query;
-    const params = [];
-    const where = [];
-
-    if (province) {
-      where.push('s.province = ?');
-      params.push(province);
-    }
-    const whereSQL = where.length ? `WHERE ${where.join(' AND ')}` : '';
-
-    const sql = `
-      SELECT
-        s.province,
-        s.district,
-        COALESCE(d.full_name, s.district) AS district_name,
-        COUNT(*)::int AS total,
-        SUM( CASE WHEN COALESCE(s.end_date, DATE '9999-12-31') > CURRENT_DATE THEN 1 ELSE 0 END )::int AS active
-      FROM subscribers s
-      LEFT JOIN district d ON d.province = s.province AND d.district = s.district
-      ${whereSQL}
-      GROUP BY 1,2,3
-      ORDER BY total DESC, s.district
-    `;
-    const [rows] = await db.query(sql, params);
-    res.json(rows);
-  } catch (e) {
-    console.error('Error in /api/summary/by-district:', e);
-    res.status(500).json({ error: e.message });
   }
 });
 
