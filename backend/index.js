@@ -1,7 +1,7 @@
 // backend/index.js
 const express = require('express');
 const cors = require('cors');
-const db = require('./db'); // db.js (Postgres) export: { query(sql, params) -> [rows] }
+const db = require('./db'); // db.js (Postgres): export query(sql, params) -> [rows]
 
 const app = express();
 app.use(cors());
@@ -48,14 +48,13 @@ app.get('/api/subscribers', async (req, res) => {
     const where = [];
     const params = [];
 
-    if (type)     { where.push('s.type = ?');             params.push(type); }
-    if (staType)  { where.push('s.sta_type = ?');         params.push(staType); }
-    if (subType)  { where.push('s.sub_type = ?');         params.push(subType); }
-    if (province) { where.push('s.province = ?');         params.push(province); }
-    if (district) { where.push('s.district = ?');         params.push(district); }
+    if (type)     { where.push('s.type = ?');      params.push(type); }
+    if (staType)  { where.push('s.sta_type = ?');  params.push(staType); }
+    if (subType)  { where.push('s.sub_type = ?');  params.push(subType); }
+    if (province) { where.push('s.province = ?');  params.push(province); }
+    if (district) { where.push('s.district = ?');  params.push(district); }
 
-    if (startDate){ where.push('s.sta_date >= ?');        params.push(startDate); }
-    // Postgres: cộng 1 ngày bằng INTERVAL
+    if (startDate){ where.push('s.sta_date >= ?'); params.push(startDate); }
     if (endDate)  { where.push("s.sta_date < (?::date + INTERVAL '1 day')"); params.push(endDate); }
 
     if (search) {
@@ -138,56 +137,42 @@ app.get('/api/districts', async (req, res) => {
 });
 
 // ===== /api/kpi =====
+// Active được tính theo end_date: chưa có hoặc > hôm nay
 app.get('/api/kpi', async (_req, res) => {
   try {
-    // Tổng số thuê bao
-    const [totalResult] = await db.query('SELECT COUNT(*)::int AS total FROM subscribers');
-    const totalSubscribers = totalResult?.[0]?.total || 0;
+    // helper đọc hàng đầu tiên
+    const first = (r, key) => Number((r?.[0]?.[key]) ?? 0);
 
-    // Thuê bao đang hoạt động
-    const [activeResult] = await db.query(`
+    const [t]  = await db.query('SELECT COUNT(*)::int AS total FROM subscribers');
+    const [a]  = await db.query(`
       SELECT COUNT(*)::int AS active
-      FROM subscribers s
-      LEFT JOIN sta_type st ON s.sta_type = st.sta_type
-      WHERE st.name ILIKE '%hoạt động%'
-         OR st.name ILIKE '%active%'
-         OR s.sta_type IN ('ACTIVE', '4UFF', 'CFKK')
+      FROM subscribers
+      WHERE COALESCE(end_date, DATE '9999-12-31') > CURRENT_DATE
     `);
-    const activeSubscribers = activeResult?.[0]?.active || 0;
-
-    // Tổng doanh thu (COALESCE để tránh null)
-    const [revenueResult] = await db.query(`
+    const [rv] = await db.query(`
       SELECT COALESCE(SUM(pck_charge), 0)::numeric AS revenue
       FROM subscribers
-      WHERE pck_charge IS NOT NULL
     `);
-    const totalRevenue = Number(revenueResult?.[0]?.revenue || 0);
-
-    // Thuê bao mới tháng này & tháng trước (dùng date_trunc cho chuẩn)
-    const [cur] = await db.query(`
-      SELECT COUNT(*)::int AS current_month
+    const [cm] = await db.query(`
+      SELECT COUNT(*)::int AS n
       FROM subscribers
       WHERE date_trunc('month', sta_date) = date_trunc('month', CURRENT_DATE)
     `);
-    const [prev] = await db.query(`
-      SELECT COUNT(*)::int AS last_month
+    const [lm] = await db.query(`
+      SELECT COUNT(*)::int AS n
       FROM subscribers
       WHERE date_trunc('month', sta_date) = date_trunc('month', CURRENT_DATE - INTERVAL '1 month')
     `);
 
-    const currentMonth = cur?.[0]?.current_month || 0;
-    const lastMonth = prev?.[0]?.last_month || 0;
+    const totalSubscribers = first(t, 'total');
+    const activeSubscribers = first(a, 'active');
+    const totalRevenue = Number(rv?.[0]?.revenue ?? 0);
+    const currentMonth = first(cm, 'n');
+    const lastMonth = first(lm, 'n');
+    const denom = Math.max(1, lastMonth);
+    const growthRate = Number((((currentMonth - lastMonth) / denom) * 100).toFixed(1));
 
-    const growthRate = lastMonth === 0
-      ? (currentMonth > 0 ? 100 : 0)
-      : Number((((currentMonth - lastMonth) / lastMonth) * 100).toFixed(1));
-
-    res.json({
-      totalSubscribers,
-      activeSubscribers,
-      totalRevenue,
-      growthRate,
-    });
+    res.json({ totalSubscribers, activeSubscribers, totalRevenue, growthRate });
   } catch (err) {
     console.error('Error in /api/kpi:', err);
     res.status(500).json({ error: err.message });
