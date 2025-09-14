@@ -43,3 +43,4 @@ dist/
 .vercel/
 
 # Build output
+project/backend/
