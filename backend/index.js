@@ -1,19 +1,71 @@
 // backend/index.js
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const db = require('./db'); // db.js (Postgres): export query(sql, params) -> [rows]
 
 const app = express();
-app.use(cors()); // có thể siết origin sau khi FE deploy ổn định
-app.use(express.json());
 
+// --- CORS (cho cookie cross-site) ---
+const isProd = process.env.NODE_ENV === 'production';
+const allowlist = [
+  'http://localhost:5173',
+  process.env.FRONTEND_ORIGIN || '', // ví dụ: https://your-frontend.onrender.com
+].filter(Boolean);
+
+app.use(cors({
+  origin: (origin, cb) => {
+    // Cho phép cả requests không có Origin (curl, health checks)
+    if (!origin) return cb(null, true);
+    return cb(null, allowlist.includes(origin));
+  },
+  credentials: true,
+}));
+
+app.use(express.json());
+app.use(cookieParser());
+
+// --- Cookie & JWT helpers ---
+const cookieOpts = {
+  httpOnly: true,
+  secure: isProd,                // cần HTTPS khi prod
+  sameSite: isProd ? 'none' : 'lax',
+  path: '/',
+  maxAge: 60 * 60 * 1000,        // 1h
+};
+const JWT_SECRET = process.env.JWT_SECRET || 'dev_only_secret_change_me';
+const signToken = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
+const verifyToken = (token) => jwt.verify(token, JWT_SECRET);
+
+const requireAuth = (req, res, next) => {
+  try {
+    const token = req.cookies?.access_token || (req.headers.authorization || '').replace(/^Bearer /, '');
+    if (!token) return res.status(401).json({ error: 'Unauthenticated' });
+    req.user = verifyToken(token); // { uid, email, role, iat, exp }
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+const loginLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// -------- Health checks (không cần auth) --------
 console.log('[BOOT] CWD =', process.cwd());
 console.log('[BOOT] ENV (safe) =', {
   DATABASE_URL: process.env.DATABASE_URL ? 'set' : 'missing',
   DB_POOL_SIZE: process.env.DB_POOL_SIZE || 'default',
+  FRONTEND_ORIGIN: process.env.FRONTEND_ORIGIN || '(none)',
+  NODE_ENV: process.env.NODE_ENV || '(unset)',
 });
 
-// -------- Health checks --------
 app.get('/', (_req, res) => res.send('Backend API is running (Postgres/Neon)'));
 app.get('/api/healthz', (_req, res) => res.json({ status: 'ok' }));
 app.get('/api/readyz', async (_req, res) => {
@@ -25,8 +77,52 @@ app.get('/api/readyz', async (_req, res) => {
   }
 });
 
+// ===================== AUTH =====================
+
+// Đăng nhập: xác thực bằng pgcrypto (bcrypt) ngay trong SQL
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: 'Missing email/password' });
+
+    // Chỉ trả id,email,role nếu đúng mật khẩu
+    const [rows] = await db.query(
+      'SELECT id, email, role FROM users WHERE email = ? AND password_hash = crypt(?, password_hash)',
+      [email, password]
+    );
+    const user = rows?.[0];
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const token = signToken({ uid: user.id, email: user.email, role: user.role });
+    res.cookie('access_token', token, cookieOpts);
+    res.json(user);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lấy thông tin phiên đăng nhập (nếu có)
+app.get('/api/auth/me', (req, res) => {
+  try {
+    const token = req.cookies?.access_token || (req.headers.authorization || '').replace(/^Bearer /, '');
+    if (!token) return res.json({ user: null });
+    const payload = verifyToken(token);
+    res.json({ user: { id: payload.uid, email: payload.email, role: payload.role } });
+  } catch (_e) {
+    res.json({ user: null });
+  }
+});
+
+// Đăng xuất: xoá cookie
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('access_token', { ...cookieOpts, maxAge: 0 });
+  res.json({ ok: true });
+});
+
+// ============== API DỮ LIỆU (đã bảo vệ) ==============
+
 // ===== /api/subscribers (filters + pagination) =====
-app.get('/api/subscribers', async (req, res) => {
+app.get('/api/subscribers', requireAuth, async (req, res) => {
   try {
     // pagination
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
@@ -111,7 +207,7 @@ app.get('/api/subscribers', async (req, res) => {
 });
 
 // ===== /api/provinces =====
-app.get('/api/provinces', async (_req, res) => {
+app.get('/api/provinces', requireAuth, async (_req, res) => {
   try {
     const [rows] = await db.query('SELECT DISTINCT province FROM district ORDER BY province');
     res.json(rows);
@@ -122,7 +218,7 @@ app.get('/api/provinces', async (_req, res) => {
 });
 
 // ===== /api/districts?province=... =====
-app.get('/api/districts', async (req, res) => {
+app.get('/api/districts', requireAuth, async (req, res) => {
   const { province } = req.query;
   try {
     const [rows] = await db.query(
@@ -137,8 +233,7 @@ app.get('/api/districts', async (req, res) => {
 });
 
 // ===== /api/kpi =====
-// Active = end_date NULL hoặc > hôm nay
-app.get('/api/kpi', async (_req, res) => {
+app.get('/api/kpi', requireAuth, async (_req, res) => {
   try {
     const first = (r, key) => Number((r?.[0]?.[key]) ?? 0);
 
@@ -179,8 +274,7 @@ app.get('/api/kpi', async (_req, res) => {
 });
 
 // ===== /api/summary/by-district =====
-// Tổng hợp theo huyện; hỗ trợ lọc theo province (?province=QNA)
-app.get('/api/summary/by-district', async (req, res) => {
+app.get('/api/summary/by-district', requireAuth, async (req, res) => {
   try {
     const { province } = req.query;
     const params = [];
