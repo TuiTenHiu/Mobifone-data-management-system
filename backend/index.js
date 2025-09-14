@@ -1,133 +1,92 @@
-// index.js
-'use strict';
-
+// backend/index.js
 const express = require('express');
 const cors = require('cors');
+const db = require('./db'); // db.js (Postgres) export: { query(sql, params) -> [rows] }
 
-// ===== Boot logs (ẩn mật khẩu) =====
-console.log('[BOOT] CWD =', process.cwd());
-console.log('[BOOT] ENV (safe) =', {
-  DB_HOST: process.env.DB_HOST,
-  DB_PORT: process.env.DB_PORT,
-  DB_USER: process.env.DB_USER,
-  DB_NAME: process.env.DB_NAME,
-});
-
-/**
- * Tìm & nạp module DB (db.js) ở nhiều vị trí ứng viên.
- * Hỗ trợ cả hai kiểu chạy:
- *  - Chạy trong thư mục backend: require('./db')
- *  - Chạy từ repo root        : require('./backend/db')
- */
-function loadDb() {
-  const candidates = ['./db', './backend/db', '../backend/db', '../db'];
-  for (const p of candidates) {
-    try {
-      const mod = require(p);
-      console.log('[BOOT] DB module path =', require.resolve(p));
-      return mod;
-    } catch (err) {
-      if (err?.code !== 'MODULE_NOT_FOUND') throw err;
-    }
-  }
-  throw new Error(`Không tìm thấy db.js. Đã thử: ${candidates.join(', ')}`);
-}
-
-const db = loadDb();
-
-// ===== App =====
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// (tuỳ chọn) tránh request treo quá lâu
-app.use((req, res, next) => {
-  req.setTimeout(30_000);
-  res.setTimeout(30_000);
-  next();
+console.log('[BOOT] CWD =', process.cwd());
+console.log('[BOOT] ENV (safe) =', {
+  DATABASE_URL: process.env.DATABASE_URL ? 'set' : 'missing',
+  DB_POOL_SIZE: process.env.DB_POOL_SIZE || 'default',
 });
 
-console.log('Đã khởi động file index.js');
-
-// ===== Health & test =====
-app.get('/', (_req, res) => res.send('Backend API is running on Render!'));
-
-app.get('/api/healthz', (_req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-  });
-});
-
+// -------- Health checks --------
+app.get('/', (_req, res) => res.send('Backend API is running (Postgres/Neon)'));
+app.get('/api/healthz', (_req, res) => res.json({ status: 'ok' }));
 app.get('/api/readyz', async (_req, res) => {
   try {
-    await db.query('SELECT 1');
-    res.status(200).json({ status: 'ready' });
+    await db.query('select 1');
+    res.json({ db: true });
   } catch (e) {
-    res.status(503).json({ status: 'db_down', error: e.code || e.message });
+    res.status(503).json({ db: false, error: e.code || e.message });
   }
 });
 
-// Debug DB (xong có thể xoá)
-app.get('/_debug/db', async (_req, res) => {
-  try {
-    const [r] = await db.query('SELECT 1 AS ok');
-    res.json({ ok: r?.[0]?.ok === 1 });
-  } catch (e) {
-    res.status(500).json({ err: { code: e.code, errno: e.errno, message: e.message } });
-  }
-});
-
-// ===== APIs =====
-
-/**
- * /api/subscribers — phân trang + lọc cơ bản
- * Hỗ trợ:
- *  - page, pageSize  (ví dụ: ?page=2&pageSize=100)
- *  - hoặc limit, offset (ví dụ: ?limit=100&offset=200)
- *  - bộ lọc: province, district, sta_type, sub_type, q (tìm gần đúng sub_id/pck_code)
- */
+// ===== /api/subscribers (filters + pagination) =====
 app.get('/api/subscribers', async (req, res) => {
   try {
-    const page     = Math.max(parseInt(req.query.page ?? '1', 10), 1);
-    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize ?? '100', 10), 1), 500);
+    // pagination
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '50', 10), 1), 1000);
+    const offset = (page - 1) * pageSize;
 
-    const limit  = Math.min(parseInt(req.query.limit  ?? String(pageSize), 10), 500);
-    const offset = parseInt(req.query.offset ?? String((page - 1) * pageSize), 10);
-
-    const { province, district, sta_type, sub_type, q } = req.query;
+    // filters
+    const {
+      type,
+      staType,
+      subType,
+      province,
+      district,
+      startDate,
+      endDate,
+      search,
+    } = req.query;
 
     const where = [];
     const params = [];
 
-    if (province) { where.push('s.province = ?'); params.push(province); }
-    if (district) { where.push('s.district = ?'); params.push(district); }
-    if (sta_type) { where.push('s.sta_type = ?'); params.push(sta_type); }
-    if (sub_type) { where.push('s.sub_type = ?'); params.push(sub_type); }
-    if (q) {
-      where.push('(s.sub_id LIKE ? OR s.pck_code LIKE ?)');
-      params.push(`%${q}%`, `%${q}%`);
+    if (type)     { where.push('s.type = ?');             params.push(type); }
+    if (staType)  { where.push('s.sta_type = ?');         params.push(staType); }
+    if (subType)  { where.push('s.sub_type = ?');         params.push(subType); }
+    if (province) { where.push('s.province = ?');         params.push(province); }
+    if (district) { where.push('s.district = ?');         params.push(district); }
+
+    if (startDate){ where.push('s.sta_date >= ?');        params.push(startDate); }
+    // Postgres: cộng 1 ngày bằng INTERVAL
+    if (endDate)  { where.push("s.sta_date < (?::date + INTERVAL '1 day')"); params.push(endDate); }
+
+    if (search) {
+      where.push('(s.sub_id ILIKE ? OR s.pck_code ILIKE ?)');
+      params.push(`%${search}%`, `%${search}%`);
     }
 
     const whereSQL = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const dataSQL = `
+    // count
+    const countSql = `SELECT COUNT(*)::int AS total FROM subscribers s ${whereSQL}`;
+    const [countRows] = await db.query(countSql, params);
+    const total = Number(countRows?.[0]?.total || 0);
+
+    // data
+    const dataSql = `
       SELECT 
-        s.sub_id     AS SUB_ID,
-        s.type       AS TYPE,
-        s.sta_type   AS STA_TYPE,
-        s.sub_type   AS SUB_TYPE,
-        s.sta_date   AS STA_DATE,
-        s.end_date   AS END_DATE,
-        s.province   AS PROVINCE,
-        s.district   AS DISTRICT,
-        s.pck_code   AS PCK_CODE,
-        s.pck_date   AS PCK_DATE,
-        s.pck_charge AS PCK_CHARGE,
-        st.name      AS sta_type_name, 
-        su.name      AS sub_type_name, 
-        d.full_name  AS district_name
+        s.sub_id     AS "SUB_ID",
+        s.type       AS "TYPE",
+        s.sta_type   AS "STA_TYPE",
+        s.sub_type   AS "SUB_TYPE",
+        s.sta_date   AS "STA_DATE",
+        s.end_date   AS "END_DATE",
+        s.province   AS "PROVINCE",
+        s.district   AS "DISTRICT",
+        s.pck_code   AS "PCK_CODE",
+        s.pck_date   AS "PCK_DATE",
+        s.pck_charge AS "PCK_CHARGE",
+        st.name      AS "sta_type_name",
+        su.name      AS "sub_type_name",
+        d.full_name  AS "district_name"
       FROM subscribers s
       LEFT JOIN sta_type st ON s.sta_type = st.sta_type
       LEFT JOIN sub_type su ON s.sub_type = su.sub_type
@@ -136,22 +95,14 @@ app.get('/api/subscribers', async (req, res) => {
       ORDER BY s.sub_id
       LIMIT ? OFFSET ?
     `;
-
-    const dataParams = [...params, limit, Math.max(offset, 0)];
-    const [rows] = await db.query(dataSQL, dataParams);
-
-    const [cnt] = await db.query(
-      `SELECT COUNT(*) AS total FROM subscribers s ${whereSQL}`,
-      params
-    );
+    const [rows] = await db.query(dataSql, [...params, pageSize, offset]);
 
     res.json({
-      total: cnt[0].total,
-      limit,
-      offset: Math.max(offset, 0),
+      total,
       page,
-      pageSize: limit,
-      hasMore: offset + rows.length < cnt[0].total,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+      hasMore: offset + rows.length < total,
       data: rows,
     });
   } catch (err) {
@@ -160,7 +111,7 @@ app.get('/api/subscribers', async (req, res) => {
   }
 });
 
-// Danh sách tỉnh
+// ===== /api/provinces =====
 app.get('/api/provinces', async (_req, res) => {
   try {
     const [rows] = await db.query('SELECT DISTINCT province FROM district ORDER BY province');
@@ -171,10 +122,9 @@ app.get('/api/provinces', async (_req, res) => {
   }
 });
 
-// Danh sách quận/huyện theo tỉnh
+// ===== /api/districts?province=... =====
 app.get('/api/districts', async (req, res) => {
   const { province } = req.query;
-  if (!province) return res.status(400).json({ error: 'Missing query param: province' });
   try {
     const [rows] = await db.query(
       'SELECT district, full_name FROM district WHERE province = ? ORDER BY district',
@@ -187,44 +137,50 @@ app.get('/api/districts', async (req, res) => {
   }
 });
 
-// KPI
+// ===== /api/kpi =====
 app.get('/api/kpi', async (_req, res) => {
   try {
-    const [totalResult] = await db.query('SELECT COUNT(*) AS total FROM subscribers');
-    const totalSubscribers = Number(totalResult?.[0]?.total || 0);
+    // Tổng số thuê bao
+    const [totalResult] = await db.query('SELECT COUNT(*)::int AS total FROM subscribers');
+    const totalSubscribers = totalResult?.[0]?.total || 0;
 
+    // Thuê bao đang hoạt động
     const [activeResult] = await db.query(`
-      SELECT COUNT(*) AS active 
+      SELECT COUNT(*)::int AS active
       FROM subscribers s
-      LEFT JOIN sta_type st ON s.sta_type = st.sta_type 
-      WHERE st.name LIKE '%hoạt động%' 
-         OR st.name LIKE '%active%' 
+      LEFT JOIN sta_type st ON s.sta_type = st.sta_type
+      WHERE st.name ILIKE '%hoạt động%'
+         OR st.name ILIKE '%active%'
          OR s.sta_type IN ('ACTIVE', '4UFF', 'CFKK')
     `);
-    const activeSubscribers = Number(activeResult?.[0]?.active || 0);
+    const activeSubscribers = activeResult?.[0]?.active || 0;
 
+    // Tổng doanh thu (COALESCE để tránh null)
     const [revenueResult] = await db.query(`
-      SELECT SUM(pck_charge) AS revenue 
-      FROM subscribers 
+      SELECT COALESCE(SUM(pck_charge), 0)::numeric AS revenue
+      FROM subscribers
       WHERE pck_charge IS NOT NULL
     `);
     const totalRevenue = Number(revenueResult?.[0]?.revenue || 0);
 
-    const [currentMonthResult] = await db.query(`
-      SELECT COUNT(*) AS current_month 
-      FROM subscribers 
-      WHERE DATE_FORMAT(sta_date, '%Y-%m') = DATE_FORMAT(NOW(), '%Y-%m')
+    // Thuê bao mới tháng này & tháng trước (dùng date_trunc cho chuẩn)
+    const [cur] = await db.query(`
+      SELECT COUNT(*)::int AS current_month
+      FROM subscribers
+      WHERE date_trunc('month', sta_date) = date_trunc('month', CURRENT_DATE)
     `);
-    const currentMonth = Number(currentMonthResult?.[0]?.current_month || 0);
-
-    const [lastMonthResult] = await db.query(`
-      SELECT COUNT(*) AS last_month 
-      FROM subscribers 
-      WHERE DATE_FORMAT(sta_date, '%Y-%m') = DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MONTH), '%Y-%m')
+    const [prev] = await db.query(`
+      SELECT COUNT(*)::int AS last_month
+      FROM subscribers
+      WHERE date_trunc('month', sta_date) = date_trunc('month', CURRENT_DATE - INTERVAL '1 month')
     `);
-    const lastMonth = Number(lastMonthResult?.[0]?.last_month || 1);
 
-    const growthRate = Number((((currentMonth - lastMonth) / lastMonth) * 100).toFixed(1));
+    const currentMonth = cur?.[0]?.current_month || 0;
+    const lastMonth = prev?.[0]?.last_month || 0;
+
+    const growthRate = lastMonth === 0
+      ? (currentMonth > 0 ? 100 : 0)
+      : Number((((currentMonth - lastMonth) / lastMonth) * 100).toFixed(1));
 
     res.json({
       totalSubscribers,
@@ -238,17 +194,7 @@ app.get('/api/kpi', async (_req, res) => {
   }
 });
 
-// ===== 404 & Error handler =====
-app.use((req, res) => {
-  res.status(404).json({ error: 'Not Found', path: req.originalUrl });
-});
-
-app.use((err, _req, res, _next) => {
-  console.error('[UNCAUGHT ERROR]', err);
-  res.status(500).json({ error: err.message || 'Internal Server Error' });
-});
-
-// ===== Listen =====
+// -------- Start server --------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Backend API running on port ${PORT}`);
