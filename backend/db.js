@@ -1,3 +1,4 @@
+// backend/db.js
 const mysql = require('mysql2/promise');
 
 const cfg = {
@@ -14,21 +15,22 @@ const cfg = {
   connectTimeout: Number(process.env.DB_CONNECT_TIMEOUT_MS || 10000),
 };
 
-// Bật TLS cho Railway external proxy
+// BẬT TLS khi kết nối qua proxy Railway
 if (String(process.env.DB_SSL).toLowerCase() === 'true') {
-  cfg.ssl = { rejectUnauthorized: true }; // nếu vẫn lỗi cert, tạm đổi thành false để test
+  // Nếu sau deploy vẫn lỗi cert, tạm set false để test
+  cfg.ssl = { minVersion: 'TLSv1.2', rejectUnauthorized: true };
 }
 
 const pool = mysql.createPool(cfg);
 
-// Ping để log lỗi rõ
+// Ping sớm để thấy lỗi rõ
 (async () => {
   try {
     await pool.query('SELECT 1');
     console.log('[DB] initial query OK');
   } catch (err) {
     console.error('[DB] initial connect failed:', {
-      code: err.code, errno: err.errno, sqlState: err.sqlState, fatal: err.fatal, message: err.message,
+      code: err.code, errno: err.errno, sqlState: err.sqlState, fatal: err.fatal, message: err.message
     });
   }
 })();
