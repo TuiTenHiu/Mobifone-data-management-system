@@ -18,11 +18,20 @@ const cfg = {
 // BẬT TLS khi DB_SSL=true (Railway external proxy cần TLS)
 const wantSSL = String(process.env.DB_SSL || '').toLowerCase();
 if (wantSSL === 'true' || wantSSL === 'require') {
-  // Bắt đầu với rejectUnauthorized:false để qua bắt tay (nếu cert không nằm trong CA hệ thống).
-  // Khi chạy ổn rồi có thể nâng lên true.
+  // bắt tay dễ hơn; sau khi chạy ổn có thể nâng về true
   cfg.ssl = { minVersion: 'TLSv1.2', rejectUnauthorized: false };
 }
 console.log('[DB] SSL enabled =', !!cfg.ssl);
+
+// >>> THÊM LOG NÀY <<<
+console.log('[DB] cfg preview =', {
+  host: cfg.host,
+  port: cfg.port,
+  user: cfg.user,
+  db: cfg.database,
+  ssl: !!cfg.ssl,
+  hasPassword: !!cfg.password
+});
 
 const pool = mysql.createPool(cfg);
 
