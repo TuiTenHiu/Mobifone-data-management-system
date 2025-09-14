@@ -1,28 +1,35 @@
-// backend/db.js
-const mysql = require('mysql2');
+const mysql = require('mysql2/promise');
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,          // maglev.proxy.rlwy.net
+const cfg = {
+  host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER,          // root
+  user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,      // railway
+  database: process.env.DB_NAME,
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: Number(process.env.DB_POOL_SIZE || 10),
   queueLimit: 0,
   enableKeepAlive: true,
-  keepAliveInitialDelay: 0,
-  ssl: { rejectUnauthorized: false }, // Railway public endpoint
-  // ❌ lookup: ...  -> bỏ đi
-});
+  keepAliveInitialDelay: 10000,
+  connectTimeout: Number(process.env.DB_CONNECT_TIMEOUT_MS || 10000),
+};
 
-pool.getConnection((err, conn) => {
-  if (err) {
-    console.error('Kết nối database thất bại:', err.message);
-  } else {
-    console.log('Kết nối DB thành công!');
-    conn.release();
+// Bật TLS cho Railway external proxy
+if (String(process.env.DB_SSL).toLowerCase() === 'true') {
+  cfg.ssl = { rejectUnauthorized: true }; // nếu vẫn lỗi cert, tạm đổi thành false để test
+}
+
+const pool = mysql.createPool(cfg);
+
+// Ping để log lỗi rõ
+(async () => {
+  try {
+    await pool.query('SELECT 1');
+    console.log('[DB] initial query OK');
+  } catch (err) {
+    console.error('[DB] initial connect failed:', {
+      code: err.code, errno: err.errno, sqlState: err.sqlState, fatal: err.fatal, message: err.message,
+    });
   }
-});
-
-module.exports = pool.promise();
+})();
+module.exports = pool;
