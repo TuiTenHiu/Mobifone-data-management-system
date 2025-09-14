@@ -1,39 +1,55 @@
 // backend/index.js
 const express = require('express');
 const cors = require('cors');
-const cookieParser = require('cookie-parser');
-const db = require('./db');
+const db = require('./db'); // Postgres helper: db.query(sql, params) -> [rows]
 
-const { requireAuth } = require('./middleware/auth');
+// Auth middleware & routes
+const { authenticate, requireAuth } = require('./middleware/auth');
 const authRoutes = require('./routes/auth');
 
 const app = express();
 
-// CORS cho cookie cross-site
-const allowOrigins = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173')
-  .split(',')
-  .map(s => s.trim());
-
-app.use(cors({
-  origin: allowOrigins,
-  credentials: true,
-}));
-
-app.use(express.json());
-app.use(cookieParser());
-
+// --- Boot logs ---
 console.log('[BOOT] CWD =', process.cwd());
 console.log('[BOOT] ENV (safe) =', {
   DATABASE_URL: process.env.DATABASE_URL ? 'set' : 'missing',
   DB_POOL_SIZE: process.env.DB_POOL_SIZE || 'default',
+  FRONTEND_ORIGIN: process.env.FRONTEND_ORIGIN || '(not set)',
 });
+
+// --- Trust proxy (Render/Heroku/Ingress) để cookie Secure hoạt động ---
+app.set('trust proxy', 1);
+
+// --- CORS: cho phép gửi cookie (credentials) từ FE ---
+// Set FRONTEND_ORIGIN="https://your-frontend.app,https://another.com"
+// Nếu không set, sẽ cho phép tất cả (phục vụ test qua curl/Postman).
+const allowList = (process.env.FRONTEND_ORIGIN || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    credentials: true,
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // curl/Postman
+      if (allowList.length === 0 || allowList.includes(origin)) return cb(null, true);
+      return cb(new Error(`Not allowed by CORS: ${origin}`));
+    },
+  })
+);
+
+app.use(express.json());
+
+// --- Attach req.user nếu có token ---
+app.use(authenticate);
 
 // -------- Health checks --------
 app.get('/', (_req, res) => res.send('Backend API is running (Postgres/Neon)'));
 app.get('/api/healthz', (_req, res) => res.json({ status: 'ok' }));
 app.get('/api/readyz', async (_req, res) => {
   try {
-    await db.query('select 1');
+    await db.query('SELECT 1');
     res.json({ db: true });
   } catch (e) {
     res.status(503).json({ db: false, error: e.code || e.message });
@@ -43,18 +59,22 @@ app.get('/api/readyz', async (_req, res) => {
 // -------- Auth routes --------
 app.use('/api/auth', authRoutes);
 
-// ===== Protected APIs =====
-
-// /api/subscribers (filters + pagination)
-app.get('/api/subscribers', requireAuth, async (req, res) => {
+// ===== /api/subscribers (filters + pagination) =====
+app.get('/api/subscribers', async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '50', 10), 1), 1000);
     const offset = (page - 1) * pageSize;
 
     const {
-      type, staType, subType, province, district,
-      startDate, endDate, search,
+      type,
+      staType,
+      subType,
+      province,
+      district,
+      startDate,
+      endDate,
+      search,
     } = req.query;
 
     const where = [];
@@ -120,8 +140,8 @@ app.get('/api/subscribers', requireAuth, async (req, res) => {
   }
 });
 
-// /api/provinces
-app.get('/api/provinces', requireAuth, async (_req, res) => {
+// ===== /api/provinces =====
+app.get('/api/provinces', async (_req, res) => {
   try {
     const [rows] = await db.query('SELECT DISTINCT province FROM district ORDER BY province');
     res.json(rows);
@@ -131,8 +151,8 @@ app.get('/api/provinces', requireAuth, async (_req, res) => {
   }
 });
 
-// /api/districts?province=...
-app.get('/api/districts', requireAuth, async (req, res) => {
+// ===== /api/districts?province=... =====
+app.get('/api/districts', async (req, res) => {
   const { province } = req.query;
   try {
     const [rows] = await db.query(
@@ -146,7 +166,8 @@ app.get('/api/districts', requireAuth, async (req, res) => {
   }
 });
 
-// /api/kpi
+// ===== /api/kpi (bảo vệ bằng đăng nhập) =====
+// "Active" = end_date rỗng hoặc > hôm nay
 app.get('/api/kpi', requireAuth, async (_req, res) => {
   try {
     const first = (r, key) => Number((r?.[0]?.[key]) ?? 0);
