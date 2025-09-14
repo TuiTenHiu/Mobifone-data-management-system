@@ -15,16 +15,18 @@ const cfg = {
   connectTimeout: Number(process.env.DB_CONNECT_TIMEOUT_MS || 10_000),
 };
 
-// Bật TLS khi dùng Railway external proxy (maglev/monorail.proxy.rlwy.net)
-if (String(process.env.DB_SSL).toLowerCase() === 'true' || String(process.env.DB_SSL).toLowerCase() === 'require') {
-  cfg.ssl = { minVersion: 'TLSv1.2', rejectUnauthorized: true };
-  // Nếu vẫn lỗi chứng chỉ, thử tạm thời:
-  // cfg.ssl = { minVersion: 'TLSv1.2', rejectUnauthorized: false };
+// BẬT TLS khi DB_SSL=true (Railway external proxy cần TLS)
+const wantSSL = String(process.env.DB_SSL || '').toLowerCase();
+if (wantSSL === 'true' || wantSSL === 'require') {
+  // Bắt đầu với rejectUnauthorized:false để qua bắt tay (nếu cert không nằm trong CA hệ thống).
+  // Khi chạy ổn rồi có thể nâng lên true.
+  cfg.ssl = { minVersion: 'TLSv1.2', rejectUnauthorized: false };
 }
+console.log('[DB] SSL enabled =', !!cfg.ssl);
 
 const pool = mysql.createPool(cfg);
 
-// Ping sớm để thấy lỗi rõ ràng
+// Ping sớm để log lỗi chi tiết
 (async () => {
   try {
     await pool.query('SELECT 1');
