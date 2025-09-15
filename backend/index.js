@@ -3,10 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const db = require('./db'); // Postgres helper: db.query(sql, params) -> [rows]
 
-// Auth middleware & routes
-const { authenticate, requireAuth } = require('./middleware/auth');
-const authRoutes = require('./routes/auth');
-
 const app = express();
 
 // --- Boot logs ---
@@ -17,12 +13,10 @@ console.log('[BOOT] ENV (safe) =', {
   FRONTEND_ORIGIN: process.env.FRONTEND_ORIGIN || '(not set)',
 });
 
-// --- Trust proxy (Render/Heroku/Ingress) để cookie Secure hoạt động ---
+// --- Trust proxy (Render/Heroku/Ingress) ---
 app.set('trust proxy', 1);
 
-// --- CORS: cho phép gửi cookie (credentials) từ FE ---
-// Set FRONTEND_ORIGIN="https://your-frontend.app,https://another.com"
-// Nếu không set, sẽ cho phép tất cả (phục vụ test qua curl/Postman).
+// --- CORS config ---
 const allowList = (process.env.FRONTEND_ORIGIN || '')
   .split(',')
   .map(s => s.trim())
@@ -33,16 +27,15 @@ app.use(
     credentials: true,
     origin: (origin, cb) => {
       if (!origin) return cb(null, true); // curl/Postman
-      if (allowList.length === 0 || allowList.includes(origin)) return cb(null, true);
+      if (allowList.length === 0 || allowList.includes(origin) || origin.endsWith('.vercel.app')) {
+        return cb(null, true);
+      }
       return cb(new Error(`Not allowed by CORS: ${origin}`));
     },
   })
 );
 
 app.use(express.json());
-
-// --- Attach req.user nếu có token ---
-app.use(authenticate);
 
 // -------- Health checks --------
 app.get('/', (_req, res) => res.send('Backend API is running (Postgres/Neon)'));
@@ -56,9 +49,6 @@ app.get('/api/readyz', async (_req, res) => {
   }
 });
 
-// -------- Auth routes --------
-app.use('/api/auth', authRoutes);
-
 // ===== /api/subscribers (filters + pagination) =====
 app.get('/api/subscribers', async (req, res) => {
   try {
@@ -66,16 +56,7 @@ app.get('/api/subscribers', async (req, res) => {
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '50', 10), 1), 1000);
     const offset = (page - 1) * pageSize;
 
-    const {
-      type,
-      staType,
-      subType,
-      province,
-      district,
-      startDate,
-      endDate,
-      search,
-    } = req.query;
+    const { type, staType, subType, province, district, startDate, endDate, search } = req.query;
 
     const where = [];
     const params = [];
@@ -166,9 +147,8 @@ app.get('/api/districts', async (req, res) => {
   }
 });
 
-// ===== /api/kpi (bảo vệ bằng đăng nhập) =====
-// "Active" = end_date rỗng hoặc > hôm nay
-app.get('/api/kpi', requireAuth, async (_req, res) => {
+// ===== /api/kpi (bỏ requireAuth, public luôn) =====
+app.get('/api/kpi', async (_req, res) => {
   try {
     const first = (r, key) => Number((r?.[0]?.[key]) ?? 0);
 
